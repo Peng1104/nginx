@@ -1,0 +1,78 @@
+name: Check Base Image Update
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  Check-For-Update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Restore cached digest
+        uses: actions/cache/restore@v4
+        with:
+          path: .last_digest
+          key: base-image-digest
+
+      - name: Check For Changes in Base Image
+        id: check-hub
+        run: |
+          echo "Fetching latest digest for nginx:alpine..."
+          
+          LATEST_DIGEST=$(curl -s \
+            -H "Accept: application/json" \
+            "https://hub.docker.com/v2/repositories/library/nginx/tags/alpine" \
+            | jq -r '.images[] | select(.architecture=="amd64" and .os=="linux") | .digest')
+          
+          if [ -z "$LATEST_DIGEST" ] || [ "$LATEST_DIGEST" == "null" ]; then
+            echo "Could not fetch latest digest. Exiting."
+            exit 1
+          fi
+
+          LAST_KNOWN_DIGEST=$(cat .last_digest 2>/dev/null || echo "none")
+          
+          if [ "$LATEST_DIGEST" == "$LAST_KNOWN_DIGEST" ]; then
+            echo "build_needed=false" >> $GITHUB_OUTPUT
+            echo "No update needed: Base image has not changed."
+          else
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "New base image detected! New digest: $LATEST_DIGEST"
+            echo $LATEST_DIGEST > .last_digest
+          fi
+
+      - name: Save digest cache
+        if: steps.check-hub.outputs.build_needed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .last_digest
+          key: base-image-digest
+
+      - name: Checkout your repository
+        if: steps.check-hub.outputs.build_needed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        if: steps.check-hub.outputs.build_needed == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          
+      - name: Extract metadata for Docker
+        if: steps.check-hub.outputs.build_needed == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+
+      - name: Build and push your Docker image
+        if: steps.check-hub.outputs.build_needed == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+          labels: ${{ steps.meta.outputs.labels }}
